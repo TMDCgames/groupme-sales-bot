@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 import requests
 
@@ -40,7 +40,7 @@ def send_message(text: str) -> None:
 
 def help_message() -> str:
     return (
-        "🤖 Sales Bot Commands\n\n"
+        "🤖 Sales Bot v2.0 Commands\n\n"
         "Record a sale using 4 lines:\n"
         "Carrier\n"
         "$AP\n"
@@ -53,6 +53,9 @@ def help_message() -> str:
         "Trendsetters\n\n"
         "Commands:\n"
         "/totals - Show all totals\n"
+        "/today - Show today’s sales\n"
+        "/week - Show weekly totals\n"
+        "/last - Show last recorded sale\n"
         "/leaderboard - Rank agents\n"
         "/teams - Show team totals\n"
         "/reset - Reset all totals\n"
@@ -103,7 +106,6 @@ def show_leaderboard() -> str:
     lines = ["🏆 Agent Leaderboard", ""]
 
     sorted_agents = sorted(agent_totals.items(), key=lambda x: x[1], reverse=True)
-
     medals = ["🥇", "🥈", "🥉"]
 
     for index, (agent, total) in enumerate(sorted_agents, start=1):
@@ -127,6 +129,100 @@ def show_teams() -> str:
     return "\n".join(lines)
 
 
+def show_today() -> str:
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    today_sales = [
+        sale for sale in sales_history
+        if sale["date"] == today and not sale.get("deleted", False)
+    ]
+
+    if not today_sales:
+        return "📅 No sales recorded today."
+
+    total = sum(sale["amount"] for sale in today_sales)
+
+    lines = [
+        "📅 Today’s Sales",
+        "",
+        f"Sales count: {len(today_sales)}",
+        f"Today total: {money(total)}",
+        ""
+    ]
+
+    for sale in today_sales[-10:]:
+        lines.append(
+            f"- {sale['agent']}: {money(sale['amount'])} | {sale['carrier']} | {sale['team']}"
+        )
+
+    return "\n".join(lines)
+
+
+def show_week() -> str:
+    today = datetime.now().date()
+    start_of_week = today - timedelta(days=today.weekday())
+
+    weekly_sales = []
+
+    for sale in sales_history:
+        if sale.get("deleted", False):
+            continue
+
+        sale_date = datetime.strptime(sale["date"], "%Y-%m-%d").date()
+
+        if sale_date >= start_of_week:
+            weekly_sales.append(sale)
+
+    if not weekly_sales:
+        return "📆 No sales recorded this week."
+
+    total = sum(sale["amount"] for sale in weekly_sales)
+
+    weekly_agents = {}
+    weekly_teams = {}
+
+    for sale in weekly_sales:
+        weekly_agents[sale["agent"]] = weekly_agents.get(sale["agent"], 0) + sale["amount"]
+        weekly_teams[sale["team"]] = weekly_teams.get(sale["team"], 0) + sale["amount"]
+
+    lines = [
+        "📆 Weekly Totals",
+        "",
+        f"Sales count: {len(weekly_sales)}",
+        f"Week total: {money(total)}",
+        "",
+        "Top Agents:"
+    ]
+
+    for agent, amount in sorted(weekly_agents.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f"- {agent}: {money(amount)}")
+
+    lines.append("")
+    lines.append("Teams:")
+
+    for team, amount in sorted(weekly_teams.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f"- {team}: {money(amount)}")
+
+    return "\n".join(lines)
+
+
+def show_last_sale() -> str:
+    for sale in reversed(sales_history):
+        if not sale.get("deleted", False):
+            return "\n".join([
+                "🧾 Last Sale Recorded",
+                "",
+                f"Carrier: {sale['carrier']}",
+                f"AP: {money(sale['amount'])}",
+                f"Product: {sale['product']}",
+                f"Team: {sale['team']}",
+                f"Agent: {sale['agent']}",
+                f"Date: {sale['date']}"
+            ])
+
+    return "🧾 No sales recorded yet."
+
+
 def delete_last_sale(sender_name: str) -> str:
     global company_total
 
@@ -141,7 +237,7 @@ def delete_last_sale(sender_name: str) -> str:
             team_totals[team] = max(0, team_totals.get(team, 0) - amount)
             company_total = max(0, company_total - amount)
 
-            if agent_totals[sender_name] == 0:
+            if agent_totals.get(sender_name) == 0:
                 agent_totals.pop(sender_name, None)
 
             if team_totals.get(team) == 0:
@@ -174,6 +270,15 @@ def parse_sale_message(text: str, sender_name: str) -> str | None:
 
     if command in ["/totals", "totals", "show totals"]:
         return show_totals()
+
+    if command in ["/today", "today"]:
+        return show_today()
+
+    if command in ["/week", "week", "weekly"]:
+        return show_week()
+
+    if command in ["/last", "last", "last sale"]:
+        return show_last_sale()
 
     if command in ["/leaderboard", "leaderboard", "/rank", "rank"]:
         return show_leaderboard()
@@ -240,7 +345,7 @@ def parse_sale_message(text: str, sender_name: str) -> str | None:
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Sales Bot is running ✅", 200
+    return "Sales Bot v2.0 is running ✅", 200
 
 
 @app.route("/groupme_callback", methods=["POST"])
