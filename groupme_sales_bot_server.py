@@ -3,110 +3,157 @@ from datetime import datetime
 from flask import Flask, request, jsonify
 import requests
 
-# Flask app setup
 app = Flask(__name__)
 
-# Bot ID from environment variable (required for posting messages back to GroupMe)
-BOT_ID = os.environ.get('BOT_ID')
+BOT_ID = os.environ.get("BOT_ID")
 
-# In-memory stores for cumulative totals
 agent_totals = {}
 team_totals = {}
 company_total = 0.0
 
 
 def send_message(text: str) -> None:
-    """Send a message using the GroupMe Bot API."""
     if not BOT_ID:
-        print("Error: BOT_ID environment variable is not set.")
+        print("ERROR: BOT_ID environment variable is missing.")
         return
+
     payload = {
         "bot_id": BOT_ID,
         "text": text
     }
-    # GroupMe Bot post endpoint
-    url = "https://api.groupme.com/v3/bots/post"
-    resp = requests.post(url, json=payload)
-    if resp.status_code != 202:
-        print(f"Failed to send message: {resp.status_code} {resp.text}")
+
+    try:
+        resp = requests.post("https://api.groupme.com/v3/bots/post", json=payload, timeout=10)
+        print(f"GroupMe post response: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"ERROR sending message to GroupMe: {e}")
 
 
-def parse_sale_message(text: str, sender_name: str) -> str:
-    """
-    Parse the incoming sale message into structured fields and update totals.
-    Expected message format (each part on its own line):
-    Carrier\nAP\nProduct\nTeam
-    Example:
-    Moo
-    $3,828.8
-    IMM
-    Trendsetters
-    """
+def money(value: float) -> str:
+    return f"${value:,.2f}"
+
+
+def reset_totals() -> str:
+    global agent_totals, team_totals, company_total
+
+    agent_totals = {}
+    team_totals = {}
+    company_total = 0.0
+
+    return "✅ Totals reset successfully."
+
+
+def show_totals() -> str:
+    if company_total == 0:
+        return "📊 No sales recorded yet."
+
+    lines = ["📊 Current Totals", ""]
+
+    if agent_totals:
+        lines.append("Agents:")
+        for agent, total in agent_totals.items():
+            lines.append(f"- {agent}: {money(total)}")
+
+    if team_totals:
+        lines.append("")
+        lines.append("Teams:")
+        for team, total in team_totals.items():
+            lines.append(f"- {team}: {money(total)}")
+
+    lines.append("")
+    lines.append(f"Company total: {money(company_total)}")
+
+    return "\n".join(lines)
+
+
+def parse_sale_message(text: str, sender_name: str) -> str | None:
     global company_total
 
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    if len(lines) < 4:
-        return "⚠️ Unable to parse sale message. Please follow the expected format."
+    clean_text = text.strip()
+
+    if clean_text.lower() in ["/reset", "reset totals", "reset"]:
+        return reset_totals()
+
+    if clean_text.lower() in ["/totals", "totals", "show totals"]:
+        return show_totals()
+
+    if clean_text.lower() in ["/help", "help"]:
+        return (
+            "Sales Bot Commands:\n\n"
+            "Record a sale with 4 lines:\n"
+            "Carrier\n"
+            "$AP\n"
+            "Product\n"
+            "Team\n\n"
+            "Commands:\n"
+            "/totals - show current totals\n"
+            "/reset - reset all totals"
+        )
+
+    lines = [line.strip() for line in clean_text.split("\n") if line.strip()]
+
+    # Ignore normal chat messages instead of spamming errors
+    if len(lines) != 4:
+        return None
 
     carrier = lines[0]
-    # Remove currency symbols and commas, then convert to float
+
     try:
-        ap_value = float(lines[1].replace('$', '').replace(',', ''))
+        ap_value = float(lines[1].replace("$", "").replace(",", ""))
     except ValueError:
-        return "⚠️ Unable to parse AP amount."
+        return "⚠️ I could not read the AP amount. Example: $3,828.80"
+
     product = lines[2]
     team = lines[3]
 
-    # Update totals
     agent_totals[sender_name] = agent_totals.get(sender_name, 0.0) + ap_value
     team_totals[team] = team_totals.get(team, 0.0) + ap_value
     company_total += ap_value
 
-    # Format totals as currency strings
-    agent_total_str = f"${agent_totals[sender_name]:,.2f}"
-    team_total_str = f"${team_totals[team]:,.2f}"
-    company_total_str = f"${company_total:,.2f}"
-
-    # Use today’s date in ISO format for EFT field
     eft_date = datetime.now().strftime("%Y-%m-%d")
 
-    # Construct response message
-    response_lines = [
+    return "\n".join([
         f"Carrier: {carrier}",
-        f"AP: ${ap_value:,.2f}",
+        f"AP: {money(ap_value)}",
         f"EFT: {eft_date}",
         f"Team: {team}",
         f"Agent: {sender_name}",
-        "\U00002705 Close Recorded",  # ✅ check mark emoji
-        f"Agent total: {agent_total_str}",
-        f"{team} total: {team_total_str}",
-        f"Company total: {company_total_str}"
-    ]
-    return "\n".join(response_lines)
+        "",
+        "✅ Close Recorded",
+        f"Agent total: {money(agent_totals[sender_name])}",
+        f"{team} total: {money(team_totals[team])}",
+        f"Company total: {money(company_total)}"
+    ])
 
 
-@app.route('/groupme_callback', methods=['POST'])
+@app.route("/", methods=["GET"])
+def home():
+    return "Sales Bot is running ✅", 200
+
+
+@app.route("/groupme_callback", methods=["POST"])
 def groupme_callback():
-    """Endpoint for receiving GroupMe webhook events."""
-    data = request.get_json()
+    data = request.get_json(silent=True)
+
+    print("Incoming GroupMe data:", data)
+
     if not data:
         return jsonify({}), 200
 
-    # Ignore messages sent by bots
-    if data.get('sender_type') == 'bot':
+    if data.get("sender_type") == "bot":
         return jsonify({}), 200
 
-    text = data.get('text', '')
-    sender_name = data.get('name', 'Agent')
+    text = data.get("text", "")
+    sender_name = data.get("name", "Agent")
 
-    # Parse the sale message and build a response
     response_message = parse_sale_message(text, sender_name)
 
-    # Send the response back to the GroupMe group
-    send_message(response_message)
+    if response_message:
+        send_message(response_message)
 
     return jsonify({}), 200
 
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
